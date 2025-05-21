@@ -19,9 +19,11 @@
 
 // LoRaWAN configuration: see OTAAId in LMICWrapper.h
 // file not included in this project
-#include <lora-common-defs.h>
+#include "lora-common-defs.h"
 
-USBPrinter<Serial_> console(STDOUT);
+#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 0
+USBPrinter<Serial_> console(LMIC_PRINTF_TO);
+#endif
 
 namespace lora = leuville::lora;
 
@@ -48,15 +50,16 @@ public:
 
 	EndNode(const lmic_pinmap &pinmap): EndNode(&pinmap) {}
 
-	EndNode(const lmic_pinmap *pinmap): LMICWrapper(pinmap) {}
+	EndNode(const lmic_pinmap *pinmap): LMICWrapper(pinmap, LMICWrapper::KEEP_RECENT) {}
 
 	/*
-	 * delegates begin() to each sub-component and send a first message
+	 * delegates begin() to each sub-component and joins
 	 */
 	virtual void begin(const OTAAId& id, u4_t network, bool adr = true) override {
 		Wire.begin();
 		LMICWrapper::begin(id, network, adr);
-		setCallback(_msgJob, 2000); // send first message with 2s delay
+
+		startJoining(); // first message sent after JOIN, in joinJob() callback
 	}
 
 	/*
@@ -64,6 +67,7 @@ public:
 	 * configureNetwork() not included in this project
 	 */
 	virtual void initLMIC(u4_t network = 0, bool adr = true) override {
+		LMICWrapper::initLMIC(network, adr);
 		configureNetwork(static_cast<Network>(network), adr);
 	}
 
@@ -74,18 +78,35 @@ public:
 	virtual void joined(bool ok) override {
 		if (ok) {
 			setCallback(_joinJob);
+		} else {
+			unsetCallback(_joinJob);
+			unsetCallback(_msgJob);
+			unsetCallback(_txCompleteJob);
 		}
 	}
 
+	#if defined(LMIC_ENABLE_DeviceTimeReq)
+	/*
+	 * Current time should be modified using RTCZero or ISRTimer
+	 */
 	virtual void updateSystemTime(uint32_t newTime) override {
-		console.println("network time: ", newTime);
+    	#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 0
+		console.println("----------------------------------------------------------");
+		console.println("network time = ",	newTime); 
+		console.println("----------------------------------------------------------");
+    	#endif
 	}
+	#endif
 
 	/*
 	 * Handle LMIC callbacks by calling registered callback
 	 */
 	virtual void completeJob(osjob_t* job) override {
-		console.println("completeJob()");
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 1
+		console.println("----------------------------------------------------------");
+		console.println("completeJob");
+		console.println("----------------------------------------------------------");
+		#endif
 		if (job == &_msgJob)
 			msgJob();
 		else if (job == &_txCompleteJob)
@@ -101,6 +122,11 @@ public:
 		const char* format = "MSG %d";
 		char msg[80];
 		sprintf(msg, format, _count++);
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 0
+		console.println("----------------------------------------------------------");
+		console.println("msgJob -> ", msg);
+		console.println("----------------------------------------------------------");
+		#endif
 		send(msg, (_count % 2) == 0);
 	}
 
@@ -108,8 +134,12 @@ public:
 	 * Register callback to send next message
 	 */
 	virtual void txCompleteJob() {
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 1
+		console.println("----------------------------------------------------------");
 		console.println("txCompleteJob, FIFO size: ", _messages.size());
-		setCallback(_msgJob, DEVICE_MESSAGE_DELAY * 1000); 
+		console.println("----------------------------------------------------------");
+		#endif
+		setCallback(_msgJob, DEVICE_MESSAGE_DELAY * 60 * 1000); 
 	}
 
 	/*
@@ -119,11 +149,16 @@ public:
 	virtual void joinJob() {
 		LoRaWanSessionKeys keys = getSessionKeys();
 		// https://www.thethingsnetwork.org/docs/lorawan/prefix-assignments.html
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 0
+		console.println("----------------------------------------------------------");
 		console.println("netId: ", keys._netId, HEX);
 		console.println("devAddr: ", keys._devAddr, HEX);
 		console.print("nwkSKey: "); console.printHex(keys._nwkSKey, arrayCapacity(keys._nwkSKey));
 		console.print("appSKey: "); console.printHex(keys._appSKey, arrayCapacity(keys._appSKey));
+		console.println("----------------------------------------------------------");
+		#endif
 		postJoinSetup(keys._netId);
+		setCallback(_msgJob, 2000); // send first message with 2s delay
 	}
 
 	/*
@@ -131,19 +166,30 @@ public:
 	 */
 	void send(const char* message, bool ack = false) {
 		UpstreamMessage payload((uint8_t*)message, strlen(message)+1, ack);
-		console.print("send ", message);
 		LMICWrapper::send(payload);
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 1
+		console.println("----------------------------------------------------------");
+		console.print("send ", message);
 		console.println(", FIFO size: ", _messages.size());
+		console.println("----------------------------------------------------------");
+		#endif
 	}
 
 	/*
 	 * LMIC callback called on TX_COMPLETE event
 	 */
-	virtual bool isTxCompleted(const UpstreamMessage & message, bool ack) override {
+	virtual bool isTxCompleted(const UpstreamMessage & message) override {
 		setCallback(_txCompleteJob);
-		console.print("isTxCompleted ", (char*)message._buf); 
-		console.println(" / ack: ", ack);
-		return LMICWrapper::isTxCompleted(message, ack);
+		#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 1
+		console.println("----------------------------------------------------------");
+		console.print("isTxCompleted "); 
+		console.print(" / len: ", message._len);
+		console.print(" / ackRequest: ", message._ackRequested);
+		console.print(" / txrxFlags: ", message._txrxFlags);
+		console.println(" / lmicError: ", (int32_t)message._lmicTxError);
+		console.println("----------------------------------------------------------");
+		#endif
+		return LMICWrapper::isTxCompleted(message);
 	}
 
 };
@@ -166,12 +212,12 @@ EndNode 	endnode(Arduino_LMIC::GetPinmap_ThisBoard());
  */
 void setup()
 {
+	#if defined(LMIC_DEBUG_LEVEL) && LMIC_DEBUG_LEVEL > 0
 	console.begin(115200);
-
+	#endif
+	
 	statusLed.begin();
 	statusLed.on();
-
-	while(! console.available()) { delay(10); }
 
 	endnode.begin(lora::id[DEVICE_CONFIG], DEVICE_NETWORK, ADR::ON);
 
@@ -184,8 +230,7 @@ void loop()
 	endnode.runLoopOnce();
 	if (endnode.isReadyForStandby()) {
 		statusLed.off();
-	}
-	else {
+	} else {
 		statusLed.blink();
 	}
 }
