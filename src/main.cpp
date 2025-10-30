@@ -60,6 +60,8 @@ public:
 		LMICWrapper::begin(id, network, adr);
 
 		startJoining(); // first message sent after JOIN, in joinJob() callback
+
+		setNoPowerInfo();
 	}
 
 	/*
